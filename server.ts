@@ -1,0 +1,11 @@
+import 'dotenv/config';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import express from 'express';
+import { app, connectDb } from './src/server/app';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PORT = Number(process.env.PORT || 3000);
+await connectDb();
+app.use(express.static(path.resolve(__dirname, 'dist')));
+app.get('*', (_req, res) => res.sendFile(path.resolve(__dirname, 'dist', 'index.html')));
+app.listen(PORT, () => console.log(`Skill Exchange API and web server listening on http://localhost:${PORT}`));

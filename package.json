@@ -1,0 +1,50 @@
+{
+  "name": "skill-exchange-mongodb",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 3000",
+    "server": "tsx server.ts",
+    "start": "tsx server.ts",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "lint": "tsc --noEmit",
+    "test": "tsx src/tests/academic.test.ts"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.1.11",
+    "@vitejs/plugin-react": "^4.7.0",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "google-auth-library": "^9.15.1",
+    "jsonwebtoken": "^9.0.2",
+    "lucide-react": "^0.546.0",
+    "mongodb": "^6.19.0",
+    "motion": "^12.23.12",
+    "multer": "^2.0.2",
+    "nodemailer": "^7.0.5",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-router-dom": "^7.8.2"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^4.17.23",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^22.17.2",
+    "@types/nodemailer": "^6.4.17",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "autoprefixer": "^10.4.21",
+    "esbuild": "^0.25.9",
+    "tailwindcss": "^4.1.11",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vite": "^6.4.1"
+  }
+}

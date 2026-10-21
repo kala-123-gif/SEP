@@ -1,0 +1,14 @@
+Skill Exchange MongoDB project - update notes
+
+Changes in this update:
+1. Profile save now reloads the saved MongoDB profile after PATCH, so the UI reflects persisted values.
+2. Avatar upload validates supported image types and size on the client; existing authenticated GridFS avatar endpoint is used.
+3. Resource listing now calculates reviewCount and averageRating from the reviews collection, preventing stale rating values on resource cards.
+4. Closing a resource detail modal refreshes the library so newly submitted ratings appear on cards.
+5. Added a protected admin dashboard at /admin with platform counts and pending-report moderation.
+6. Admin authorization is enforced on the server. By default, the configured administrator email is suryakalagollapalli268@gmail.com.
+   To change it, add ADMIN_EMAILS=admin1@example.com,admin2@example.com to your local .env and restart the server.
+
+Security:
+- No .env file or secrets are included in this ZIP.
+- Keep your existing .env and MongoDB data.

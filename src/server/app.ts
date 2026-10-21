@@ -1,0 +1,207 @@
+import 'dotenv/config';
+import express, { Request, Response, NextFunction } from 'express';
+import cors from 'cors';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import multer from 'multer';
+import nodemailer from 'nodemailer';
+import { OAuth2Client } from 'google-auth-library';
+import { MongoClient, Db, GridFSBucket, ObjectId } from 'mongodb';
+import { INITIAL_SUBJECTS, INITIAL_RESOURCES } from '../lib/seedData.ts';
+import { ACADEMIC_YEARS, BRANCHES } from '../types/index.ts';
+
+const app = express();
+app.use(cors({ origin: process.env.CLIENT_ORIGIN?.split(',') || true, credentials: true }));
+app.use(express.json({ limit: '2mb' }));
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017';
+const dbName = process.env.MONGODB_DB || 'skill_exchange';
+const jwtSecret = process.env.JWT_SECRET || 'CHANGE_THIS_TO_A_LONG_RANDOM_SECRET_BEFORE_DEPLOYMENT';
+let client: MongoClient | null = null;
+let database: Db | null = null;
+let bucket: GridFSBucket | null = null;
+let connecting: Promise<void> | null = null;
+
+async function connectDb() {
+  if (database) return;
+  if (!connecting) connecting = (async () => {
+    const mongoClient = new MongoClient(mongoUri);
+    await mongoClient.connect();
+    client = mongoClient;
+    const dbInstance = mongoClient.db(dbName);
+    database = dbInstance;
+    bucket = new GridFSBucket(dbInstance, { bucketName: 'uploads' });
+    await Promise.all([
+      dbInstance.collection('users').createIndex({ email: 1 }, { unique: true }),
+      dbInstance.collection('resources').createIndex({ createdAt: -1 }),
+      dbInstance.collection('reviews').createIndex({ resourceId: 1, createdAt: -1 }),
+      dbInstance.collection('activities').createIndex({ userId: 1, timestamp: -1 }),
+      dbInstance.collection('bookmarks').createIndex({ userId: 1, resourceId: 1 }, { unique: true }),
+      dbInstance.collection('votes').createIndex({ resourceId: 1, userId: 1 }, { unique: true }),
+    ]);
+  })();
+  try { await connecting; } finally { connecting = null; }
+}
+app.use(async (_req, res, next) => { try { await connectDb(); next(); } catch (e: any) { console.error('MongoDB connection failed:', e); res.status(503).json({ error: 'Could not connect to MongoDB. Check MONGODB_URI and make sure MongoDB is running.' }); } });
+const col = (name: string) => database!.collection(name);
+function tokenFor(user: any) { return jwt.sign({ uid: user._id.toString(), email: user.email }, jwtSecret, { expiresIn: '7d' }); }
+function safeUser(user: any) { return { uid: user._id.toString(), email: user.email, displayName: user.displayName || 'Student', photoURL: user.photoURL || '' }; }
+function auth(req: any, res: Response, next: NextFunction) {
+  const header = req.headers.authorization || '';
+  try { if (!header.startsWith('Bearer ')) throw new Error(); req.auth = jwt.verify(header.slice(7), jwtSecret); next(); }
+  catch { res.status(401).json({ error: 'Please sign in again. Your session is missing or expired.' }); }
+}
+function own(req: any, res: Response, uid: string) { if (req.auth?.uid !== uid) { res.status(403).json({ error: 'You are not allowed to access another user account.' }); return false; } return true; }
+function cleanUserDoc(d: any) { const { _id, passwordHash, resetToken, resetExpires, ...rest } = d; return { uid: _id.toString(), ...rest }; }
+function asId(v: string): ObjectId { return ObjectId.isValid(v) ? new ObjectId(v) : new ObjectId('000000000000000000000000'); }
+function validateResourceUpload(file: Express.Multer.File | undefined) { if (!file) return; const ext = file.originalname.split('.').pop()?.toLowerCase() || ''; const allowed = new Set(['pdf','doc','docx','ppt','pptx','txt','png','jpg','jpeg']); if (!allowed.has(ext)) throw new Error('Unsupported file format. Upload PDF, Word, PowerPoint, TXT or image files.'); if (file.size <= 0 || file.size > 25 * 1024 * 1024) throw new Error('File must be between 1 byte and 25 MB.'); }
+
+app.get('/api/health', (_req, res) => res.json({ ok: true, database: dbName, storage: 'MongoDB GridFS' }));
+app.get('/api/semesters', (_req, res) => res.json({ years: ACADEMIC_YEARS, branches: BRANCHES }));
+
+// Authentication: local MongoDB accounts; no Firebase or third-party auth service.
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { email, password, displayName, college, degree, branch, academicYear, semester } = req.body;
+    if (!email || !/^\S+@\S+\.\S+$/.test(email) || !password || password.length < 8 || !displayName || !college) return res.status(400).json({ error: 'Enter a valid email, name, college and a password of at least 8 characters.' });
+    const normalized = String(email).trim().toLowerCase();
+    if (await col('users').findOne({ email: normalized })) return res.status(409).json({ error: 'This email is already registered. Please sign in.' });
+    const now = new Date().toISOString();
+    const user = { email: normalized, passwordHash: await bcrypt.hash(password, 12), displayName: String(displayName).trim(), college: String(college).trim(), degree: degree || 'B.Tech', branch: branch || 'CSE', academicYear: academicYear || 'Year I', semester: Number(semester) || 1, interests: [], skills: [], bio: '', photoURL: '', createdAt: now, updatedAt: now };
+    const result = await col('users').insertOne(user);
+    const created = { ...user, _id: result.insertedId };
+    res.status(201).json({ token: tokenFor(created), user: safeUser(created) });
+  } catch (e: any) { console.error(e); res.status(500).json({ error: 'Could not create account.' }); }
+});
+app.post('/api/auth/login', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const user = await col('users').findOne({ email });
+  if (!user || !await bcrypt.compare(String(req.body.password || ''), user.passwordHash || '')) return res.status(401).json({ error: 'Invalid email or password.' });
+  res.json({ token: tokenFor(user), user: safeUser(user) });
+});
+app.get('/api/auth/me', auth, async (req: any, res) => { const u = await col('users').findOne({ _id: asId(req.auth.uid) }); if (!u) return res.status(404).json({ error: 'Account not found.' }); res.json({ user: safeUser(u) }); });
+const googleRedirectUri = () => process.env.GOOGLE_REDIRECT_URI || `${process.env.APP_URL || 'http://localhost:3000'}/api/auth/google/callback`;
+app.get('/api/auth/google', (_req, res) => {
+  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) return res.status(503).send('Google OAuth is not configured. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to .env.');
+  const oauth = new OAuth2Client(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, googleRedirectUri());
+  const state = jwt.sign({ purpose: 'google-oauth' }, jwtSecret, { expiresIn: '10m' });
+  res.redirect(oauth.generateAuthUrl({ access_type: 'online', scope: ['openid', 'email', 'profile'], state, prompt: 'select_account' }));
+});
+app.get('/api/auth/google/callback', async (req, res) => {
+  try {
+    if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET || !req.query.code || !req.query.state) return res.status(400).send('Google sign-in could not be completed.');
+    jwt.verify(String(req.query.state), jwtSecret);
+    const oauth = new OAuth2Client(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, googleRedirectUri());
+    const { tokens } = await oauth.getToken(String(req.query.code));
+    if (!tokens.id_token) throw new Error('Google did not return an ID token.');
+    const ticket = await oauth.verifyIdToken({ idToken: tokens.id_token, audience: process.env.GOOGLE_CLIENT_ID });
+    const payload = ticket.getPayload();
+    if (!payload?.email || !payload.email_verified) throw new Error('Google account email is not verified.');
+    const email = payload.email.toLowerCase();
+    let user = await col('users').findOne({ email });
+    if (!user) {
+      const now = new Date().toISOString();
+      const inserted = await col('users').insertOne({ email, passwordHash: await bcrypt.hash(jwt.sign({ email, nonce: Date.now() }, jwtSecret), 12), displayName: payload.name || 'Student', college: 'Engineering Institute of Technology', degree: 'B.Tech', branch: 'CSE', academicYear: 'Year I', semester: 1, interests: [], skills: [], bio: '', photoURL: payload.picture || '', createdAt: now, updatedAt: now, authProvider: 'google' });
+      user = await col('users').findOne({ _id: inserted.insertedId });
+    } else if (payload.picture && !user.photoURL) {
+      await col('users').updateOne({ _id: user._id }, { $set: { photoURL: payload.picture, updatedAt: new Date().toISOString() } });
+      user.photoURL = payload.picture;
+    }
+    const sessionToken = tokenFor(user);
+    res.redirect(`${process.env.APP_URL || 'http://localhost:3000'}/?authToken=${encodeURIComponent(sessionToken)}`);
+  } catch (e) { console.error('Google OAuth callback failed:', e); res.status(401).send('Google sign-in failed. Return to Skill Exchange and try again.'); }
+});
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase(); const user = await col('users').findOne({ email });
+  // Avoid disclosing whether an account exists.
+  if (user) {
+    const crypto = await import('node:crypto'); const token = crypto.randomBytes(32).toString('hex');
+    await col('users').updateOne({ _id: user._id }, { $set: { resetToken: await bcrypt.hash(token, 10), resetExpires: new Date(Date.now() + 60 * 60 * 1000) } });
+    if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+      const transporter = nodemailer.createTransport({ host: process.env.SMTP_HOST, port: Number(process.env.SMTP_PORT || 587), secure: process.env.SMTP_SECURE === 'true', auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } });
+      const link = `${process.env.APP_URL || 'http://localhost:3000'}/reset-password?token=${token}&email=${encodeURIComponent(email)}`;
+      await transporter.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to: email, subject: 'Skill Exchange password reset', text: `Reset your password using this link (valid for one hour): ${link}` });
+    } else console.warn(`Password reset requested for ${email}; configure SMTP to deliver reset email.`);
+  }
+  if (!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS)) return res.status(503).json({ error: 'Password reset email is not configured yet. Add SMTP settings to your .env file, or contact the administrator.' });
+  res.json({ message: 'If an account exists for this email, password reset instructions will be sent.' });
+});
+app.post('/api/auth/reset-password', async (req, res) => {
+  const { email, token, password } = req.body; if (!email || !token || !password || password.length < 8) return res.status(400).json({ error: 'Invalid reset request.' });
+  const user = await col('users').findOne({ email: String(email).toLowerCase(), resetExpires: { $gt: new Date() } });
+  if (!user?.resetToken || !await bcrypt.compare(token, user.resetToken)) return res.status(400).json({ error: 'Reset link is invalid or expired.' });
+  await col('users').updateOne({ _id: user._id }, { $set: { passwordHash: await bcrypt.hash(password, 12), updatedAt: new Date().toISOString() }, $unset: { resetToken: '', resetExpires: '' } }); res.json({ message: 'Password updated successfully.' });
+});
+
+// Profiles
+app.get('/api/profile/:uid', auth, async (req: any, res) => { if (!own(req, res, req.params.uid)) return; const d = await col('users').findOne({ _id: asId(req.params.uid) }); if (!d) return res.status(404).json({ error: 'Profile not found.' }); res.json(cleanUserDoc(d)); });
+app.post('/api/profile', auth, async (req: any, res) => { const p = req.body; if (!own(req, res, p.uid)) return; const existing = await col('users').findOne({ _id: asId(p.uid) }); if (!existing) return res.status(404).json({ error: 'Account not found.' }); const allowed = ['displayName','college','degree','branch','academicYear','semester','interests','skills','bio','photoURL']; const updates: any = { updatedAt: new Date().toISOString() }; allowed.forEach(k => { if (p[k] !== undefined) updates[k] = p[k]; }); await col('users').updateOne({ _id: existing._id }, { $set: updates }); res.json({ success: true }); });
+app.patch('/api/profile/:uid', auth, async (req: any, res) => { if (!own(req, res, req.params.uid)) return; const allowed = ['displayName','college','degree','branch','academicYear','semester','interests','skills','bio','photoURL']; const updates: any = { updatedAt: new Date().toISOString() }; allowed.forEach(k => { if (req.body[k] !== undefined) updates[k] = req.body[k]; }); const result = await col('users').updateOne({ _id: asId(req.params.uid) }, { $set: updates }); if (!result.matchedCount) return res.status(404).json({ error: 'Profile not found.' }); res.json({ success: true }); });
+app.post('/api/profile/avatar', auth, upload.single('file'), async (req: any, res) => { if (!req.file) return res.status(400).json({ error: 'Choose an image first.' }); if (!/^image\/(jpeg|png|webp|gif)$/.test(req.file.mimetype)) return res.status(400).json({ error: 'Avatar must be a JPG, PNG, WEBP or GIF image.' }); const id = await saveFile(req.file, { ownerId: req.auth.uid, kind: 'avatar' }); const url = `/api/files/${id}`; await col('users').updateOne({ _id: asId(req.auth.uid) }, { $set: { photoURL: url, updatedAt: new Date().toISOString() } }); res.json({ url }); });
+
+// Subjects are stored in MongoDB and seeded once when the collection is empty.
+app.get('/api/subjects', async (req, res) => { let docs = await col('subjects').find().toArray(); if (!docs.length) { await col('subjects').insertMany(INITIAL_SUBJECTS.map(s => ({ ...s })), { ordered: false }); docs = await col('subjects').find().toArray(); } let subjects: any[] = docs.map(({ _id, ...d }) => ({ id: String(_id), ...d })); const { branch, year, semester } = req.query; if (branch) subjects = subjects.filter(s => s.branch.toUpperCase() === String(branch).toUpperCase() || s.branch.toUpperCase() === 'COMMON'); if (year) subjects = subjects.filter(s => s.academicYear === year); if (semester) subjects = subjects.filter(s => Number(s.semester) === Number(semester)); res.json({ count: subjects.length, subjects }); });
+
+async function saveFile(file: Express.Multer.File, metadata: any): Promise<string> { const id = new ObjectId(); const stream = bucket!.openUploadStreamWithId(id, file.originalname, { metadata: { ...metadata, contentType: file.mimetype || 'application/octet-stream', originalName: file.originalname, size: file.size, uploadedAt: new Date() } }); await new Promise<void>((resolve, reject) => { stream.on('error', reject); stream.on('finish', () => resolve()); stream.end(file.buffer); }); return id.toString(); }
+app.get('/api/files/:id', async (req, res) => { if (!ObjectId.isValid(req.params.id)) return res.status(404).end(); const id = new ObjectId(req.params.id); const f = await col('uploads.files').findOne({ _id: id }); if (!f) return res.status(404).json({ error: 'File not found.' }); res.setHeader('Content-Type', f.metadata?.contentType || 'application/octet-stream'); res.setHeader('Content-Length', f.length); const disposition = req.query.download === '1' ? 'attachment' : 'inline'; res.setHeader('Content-Disposition', `${disposition}; filename*=UTF-8''${encodeURIComponent(f.filename || 'document')}`); bucket!.openDownloadStream(id).on('error', () => { if (!res.headersSent) res.status(404).end(); }).pipe(res); });
+
+// Resource library
+app.post('/api/resources/seed', async (_req, res) => { if (!(await col('resources').countDocuments())) { await col('resources').insertMany(INITIAL_RESOURCES.map(r => ({ ...r, createdAt: r.createdAt || new Date().toISOString() })), { ordered: false }); } res.json({ seeded: true }); });
+app.get('/api/resources', async (req, res) => { const f = req.query; const query: any = {}; if (f.branch) query.$or = [{ branch: String(f.branch).toUpperCase() }, { branch: 'ALL' }, { branch: { $exists: false } }]; if (f.academicYear) query.academicYear = f.academicYear; if (f.semester) query.semester = Number(f.semester); if (f.subjectId) query.subjectId = f.subjectId; if (f.type && f.type !== 'all') query.type = f.type; if (f.uploaderId) query.uploadedBy = f.uploaderId; if (f.searchQuery) query.$and = [...(query.$and || []), { $or: ['title','description','subjectName','tags'].map(k => ({ [k]: { $regex: String(f.searchQuery), $options: 'i' } })) }]; let sort: any = { createdAt: -1 }; if (f.sortBy === 'title') sort = { title: 1 }; if (f.sortBy === 'rating') sort = { averageRating: -1 }; const docs = await col('resources').find(query).sort(sort).limit(300).toArray();
+  const ids = docs.map(d => String(d._id));
+  const reviewRows = ids.length ? await col('reviews').aggregate([
+    { $match: { resourceId: { $in: ids } } },
+    { $group: { _id: '$resourceId', count: { $sum: 1 }, average: { $avg: '$rating' } } }
+  ]).toArray() : [];
+  const ratings = new Map(reviewRows.map(r => [String(r._id), { reviewCount: Number(r.count) || 0, averageRating: Number((r.average || 0).toFixed(1)) }]));
+  res.json({ resources: docs.map(({ _id, ...d }) => ({ id: String(_id), ...d, ...(ratings.get(String(_id)) || { reviewCount: 0, averageRating: 0 }) })) }); });
+app.post('/api/resources', auth, upload.single('file'), async (req: any, res) => { try { const input = JSON.parse(req.body.metadata || '{}'); validateResourceUpload(req.file); if (!input.title || !input.uploadedBy || input.uploadedBy !== req.auth.uid) return res.status(400).json({ error: 'Invalid resource details or uploader.' }); let fileId = ''; if (req.file) fileId = await saveFile(req.file, { ownerId: req.auth.uid, kind: 'resource' }); const now = new Date().toISOString(); const resource = { ...input, title: String(input.title).slice(0,200), description: String(input.description || '').slice(0,1000), semester: Number(input.semester), fileId, fileName: req.file?.originalname || '', fileSize: req.file?.size || 0, contentType: req.file?.mimetype || '', storagePath: fileId ? `gridfs:${fileId}` : '', fileUrl: fileId ? `/api/files/${fileId}` : '', downloadURL: fileId ? `/api/files/${fileId}` : '', averageRating: 0, reviewCount: 0, helpfulVotes: 0, unhelpfulVotes: 0, status: 'approved', createdAt: now, updatedAt: now }; const result = await col('resources').insertOne(resource); res.status(201).json({ resource: { id: result.insertedId.toString(), ...resource } }); } catch (e: any) { console.error(e); res.status(400).json({ error: e.message || 'Could not upload resource.' }); } });
+app.get('/api/resources/:id', async (req, res) => { const d = await col('resources').findOne({ _id: asId(req.params.id) }); if (!d) return res.status(404).json({ error: 'Resource not found.' }); const { _id, ...rest } = d; res.json({ id: String(_id), ...rest }); });
+app.post('/api/resources/:id/file', auth, upload.single('file'), async (req: any, res) => { const old = await col('resources').findOne({ _id: asId(req.params.id) }); if (!old) return res.status(404).json({ error: 'Resource not found.' }); if (old.uploadedBy !== req.auth.uid) return res.status(403).json({ error: 'Only the original uploader can replace this file.' }); if (!req.file) return res.status(400).json({ error: 'Choose a replacement file.' }); try { validateResourceUpload(req.file); } catch (e: any) { return res.status(400).json({ error: e.message }); } const fileId = await saveFile(req.file, { ownerId: req.auth.uid, kind: 'resource' }); if (old.fileId && ObjectId.isValid(old.fileId)) { try { await bucket!.delete(new ObjectId(old.fileId)); } catch {} } const updates = { fileId, fileName: req.file.originalname, fileSize: req.file.size, contentType: req.file.mimetype, storagePath: `gridfs:${fileId}`, fileUrl: `/api/files/${fileId}`, downloadURL: `/api/files/${fileId}`, status: 'approved', updatedAt: new Date().toISOString() }; await col('resources').updateOne({ _id: old._id }, { $set: updates }); res.json({ resource: { id: String(old._id), ...old, ...updates } }); });
+app.delete('/api/resources/:id', auth, async (req: any, res) => { const d = await col('resources').findOne({ _id: asId(req.params.id) }); if (!d) return res.status(404).json({ error: 'Resource not found.' }); if (d.uploadedBy !== req.auth.uid) return res.status(403).json({ error: 'Only the uploader can delete this resource.' }); if (d.fileId && ObjectId.isValid(d.fileId)) { try { await bucket!.delete(new ObjectId(d.fileId)); } catch {} } await col('resources').deleteOne({ _id: d._id }); await col('reviews').deleteMany({ resourceId: String(d._id) }); res.json({ success: true }); });
+app.post('/api/resources/repair', auth, async (req: any, res) => { const q = req.body.userId ? { uploadedBy: req.auth.uid } : {}; const docs = await col('resources').find(q).toArray(); res.json({ checked: docs.length, repaired: 0, unavailable: docs.filter(d => !d.fileId && !d.externalUrl).length }); });
+
+// Bookmarks, reviews, votes, study activity and reports.
+app.get('/api/users/:uid/bookmarks', auth, async (req: any, res) => { if (!own(req,res,req.params.uid)) return; const docs = await col('bookmarks').find({ userId: req.params.uid }).toArray(); res.json({ ids: docs.map(d => d.resourceId) }); });
+app.post('/api/users/:uid/bookmarks/:rid', auth, async (req: any, res) => { if (!own(req,res,req.params.uid)) return; const q = { userId: req.params.uid, resourceId: req.params.rid }; const old = await col('bookmarks').findOne(q); if (old) { await col('bookmarks').deleteOne({ _id: old._id }); return res.json({ bookmarked: false }); } await col('bookmarks').insertOne({ ...q, createdAt: new Date().toISOString() }); res.json({ bookmarked: true }); });
+app.get('/api/resources/:id/reviews', async (req,res) => { const docs = await col('reviews').find({ resourceId: req.params.id }).sort({ createdAt: -1 }).toArray(); res.json({ reviews: docs.map(({ _id, ...d }) => ({ id: String(_id), ...d })) }); });
+app.post('/api/resources/:id/reviews', auth, async (req: any,res) => { const b=req.body; if (b.userId !== req.auth.uid) return res.status(403).json({error:'Not allowed'}); const doc={ resourceId:req.params.id,userId:req.auth.uid,userName:String(b.userName||'Student'),userPhotoUrl:b.userPhotoUrl||'',rating:Math.max(1,Math.min(5,Number(b.rating)||1)),comment:String(b.comment||'').slice(0,1000),createdAt:new Date().toISOString() }; await col('reviews').updateOne({resourceId:req.params.id,userId:req.auth.uid},{$set:doc},{upsert:true}); const reviews=await col('reviews').find({resourceId:req.params.id}).toArray(); const averageRating=Number((reviews.reduce((s,d)=>s+d.rating,0)/reviews.length).toFixed(1)); await col('resources').updateOne({_id:asId(req.params.id)},{$set:{averageRating,reviewCount:reviews.length}}); const saved=await col('reviews').findOne({resourceId:req.params.id,userId:req.auth.uid}); res.json({review:{id:String(saved!._id),...doc}}); });
+app.delete('/api/resources/:id/reviews/:reviewId', auth, async (req:any,res) => { const d=await col('reviews').findOne({_id:asId(req.params.reviewId),resourceId:req.params.id}); if(d&&d.userId!==req.auth.uid)return res.status(403).json({error:'You can only delete your own review.'}); if(d)await col('reviews').deleteOne({_id:d._id}); const list=await col('reviews').find({resourceId:req.params.id}).toArray(); await col('resources').updateOne({_id:asId(req.params.id)},{$set:{reviewCount:list.length,averageRating:list.length?Number((list.reduce((s,x)=>s+x.rating,0)/list.length).toFixed(1)):0}}); res.json({success:true}); });
+app.post('/api/resources/:id/votes', auth, async (req:any,res) => { const {userId,vote}=req.body;if(userId!==req.auth.uid||!['helpful','unhelpful'].includes(vote))return res.status(400).json({error:'Invalid vote.'});await col('votes').updateOne({resourceId:req.params.id,userId},{$set:{vote,createdAt:new Date().toISOString()}},{upsert:true});const all=await col('votes').find({resourceId:req.params.id}).toArray();const helpfulVotes=all.filter(x=>x.vote==='helpful').length,unhelpfulVotes=all.filter(x=>x.vote==='unhelpful').length;await col('resources').updateOne({_id:asId(req.params.id)},{$set:{helpfulVotes,unhelpfulVotes}});res.json({helpfulVotes,unhelpfulVotes,userVote:vote}); });
+app.get('/api/resources/:id/votes', async(req,res)=>{const all=await col('votes').find({resourceId:req.params.id}).toArray();res.json({helpful:all.filter(x=>x.vote==='helpful').length,unhelpful:all.filter(x=>x.vote==='unhelpful').length});});
+app.get('/api/resources/:id/votes/:uid', auth, async(req:any,res)=>{if(!own(req,res,req.params.uid))return;const d=await col('votes').findOne({resourceId:req.params.id,userId:req.params.uid});res.json({vote:d?.vote||null});});
+app.post('/api/users/:uid/activity', auth, async(req:any,res)=>{if(!own(req,res,req.params.uid))return;const a={...req.body,userId:req.params.uid,resourceTitle:String(req.body.resourceTitle||'').slice(0,200),subjectName:String(req.body.subjectName||'').slice(0,150),timestamp:new Date().toISOString()};await col('activities').updateOne({userId:req.params.uid,resourceId:a.resourceId},{$set:a},{upsert:true});res.json({success:true});});
+app.get('/api/users/:uid/activity', auth, async(req:any,res)=>{if(!own(req,res,req.params.uid))return;const docs=await col('activities').find({userId:req.params.uid}).sort({timestamp:-1}).limit(100).toArray();res.json({activities:docs.map(({_id,...d})=>({id:String(_id),...d}))});});
+app.delete('/api/users/:uid/activity', auth, async(req:any,res)=>{if(!own(req,res,req.params.uid))return;await col('activities').deleteMany({userId:req.params.uid});res.json({success:true});});
+app.post('/api/reports', auth, async(req:any,res)=>{if(req.body.reportedBy!==req.auth.uid)return res.status(403).json({error:'Not allowed'});const d={...req.body,reportedBy:req.auth.uid,details:String(req.body.details||'').slice(0,1000),status:'pending',createdAt:new Date().toISOString()};const result=await col('reports').insertOne(d);res.status(201).json({report:{id:String(result.insertedId),...d}});});
+
+
+// Admin-only moderation overview.
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || 'suryakalagollapalli268@gmail.com').split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
+function requireAdmin(req: any, res: Response) {
+  if (!ADMIN_EMAILS.includes(String(req.auth?.email || '').toLowerCase())) {
+    res.status(403).json({ error: 'Administrator access required.' });
+    return false;
+  }
+  return true;
+}
+app.get('/api/admin/overview', auth, async (req: any, res) => {
+  if (!requireAdmin(req, res)) return;
+  const [users, resources, pendingReports, reviews] = await Promise.all([
+    col('users').countDocuments(), col('resources').countDocuments(),
+    col('reports').countDocuments({ status: 'pending' }), col('reviews').countDocuments()
+  ]);
+  const reports = await col('reports').find({ status: 'pending' }).sort({ createdAt: -1 }).limit(100).toArray();
+  res.json({ stats: { users, resources, pendingReports, reviews }, reports: reports.map(({ _id, ...d }) => ({ id: String(_id), ...d })) });
+});
+app.patch('/api/admin/reports/:id', auth, async (req: any, res) => {
+  if (!requireAdmin(req, res)) return;
+  const status = String(req.body.status || '');
+  if (!['reviewed', 'dismissed'].includes(status)) return res.status(400).json({ error: 'Invalid report status.' });
+  const result = await col('reports').updateOne({ _id: asId(req.params.id) }, { $set: { status, reviewedAt: new Date().toISOString(), reviewedBy: req.auth.uid } });
+  if (!result.matchedCount) return res.status(404).json({ error: 'Report not found.' });
+  res.json({ success: true });
+});
+
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => { console.error(err); if (err?.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'File exceeds the 25 MB limit.' }); res.status(500).json({ error: 'Unexpected server error.' }); });
+export { app, connectDb };
