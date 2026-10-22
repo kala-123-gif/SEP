@@ -13,6 +13,7 @@ import { ProfilePage } from './pages/ProfilePage';
 import { ResourcesPage } from './pages/ResourcesPage';
 import { UploadResourcePage } from './pages/UploadResourcePage';
 import { AdminPage } from './pages/AdminPage';
+import { CareerDevelopmentPage } from './pages/CareerDevelopmentPage';
 
 export default function App() {
   return (
@@ -58,6 +59,15 @@ export default function App() {
                 element={
                   <ProtectedRoute>
                     <ProfilePage />
+                  </ProtectedRoute>
+                }
+              />
+              {/* Career Development Page */}
+              <Route
+                path="/career-development"
+                element={
+                  <ProtectedRoute>
+                    <CareerDevelopmentPage />
                   </ProtectedRoute>
                 }
               />
