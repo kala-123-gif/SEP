@@ -21,6 +21,8 @@ import {
   Sparkles,
   CheckCircle2,
   FileText,
+  Users,
+  Rocket,
   Video,
   FileCode,
   FileDown,
@@ -202,7 +204,59 @@ export const DashboardPage: React.FC = () => {
           </div>
         </div>
       </div>
+      {/* Student Mentorship and Career Development */}
+      <section className="space-y-4">
+        <div>
+          <h2 className="text-lg font-bold text-slate-900">
+            Explore Your Student Hub
+          </h2>
+          <p className="text-sm text-slate-500">
+            Connect with peers, discover mentors, and plan your future career.
+          </p>
+        </div>
 
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+          <Link
+            to="/skill-exchange"
+            className="group rounded-3xl border border-violet-200 bg-white p-6 shadow-sm transition hover:-translate-y-1 hover:border-violet-400 hover:shadow-lg"
+          >
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-100 text-violet-700">
+              <Users className="h-6 w-6" />
+            </div>
+            <h3 className="text-lg font-bold text-slate-900">
+              Student Mentorship & Skill Exchange
+            </h3>
+            <p className="mt-2 text-sm leading-relaxed text-slate-600">
+              Discover students, exchange skills, connect with mentors, send
+              messages, and organize study sessions.
+            </p>
+            <span className="mt-4 inline-flex items-center gap-2 text-sm font-bold text-violet-700">
+              Explore Student Mentorship
+              <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+            </span>
+          </Link>
+
+          <Link
+            to="/career-development"
+            className="group rounded-3xl border border-indigo-200 bg-white p-6 shadow-sm transition hover:-translate-y-1 hover:border-indigo-400 hover:shadow-lg"
+          >
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-indigo-100 text-indigo-700">
+              <Rocket className="h-6 w-6" />
+            </div>
+            <h3 className="text-lg font-bold text-slate-900">
+              Career Development & GATE Preparation
+            </h3>
+            <p className="mt-2 text-sm leading-relaxed text-slate-600">
+              Explore career roadmaps, prepare for GATE, and organize your
+              weekly learning goals.
+            </p>
+            <span className="mt-4 inline-flex items-center gap-2 text-sm font-bold text-indigo-700">
+              Explore Career Development
+              <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+            </span>
+          </Link>
+        </div>
+      </section>
       {/* Metrics & Progress Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Profile Completion */}
@@ -457,22 +511,20 @@ export const DashboardPage: React.FC = () => {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setActiveTab('bookmarks')}
-              className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
-                activeTab === 'bookmarks'
-                  ? 'bg-amber-500 text-white shadow-sm'
-                  : 'text-slate-600 hover:bg-slate-100'
-              }`}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${activeTab === 'bookmarks'
+                ? 'bg-amber-500 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-slate-100'
+                }`}
             >
               <Bookmark className="w-3.5 h-3.5" />
               <span>Saved Bookmarks ({bookmarkedResources.length})</span>
             </button>
             <button
               onClick={() => setActiveTab('completed')}
-              className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
-                activeTab === 'completed'
-                  ? 'bg-emerald-600 text-white shadow-sm'
-                  : 'text-slate-600 hover:bg-slate-100'
-              }`}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${activeTab === 'completed'
+                ? 'bg-emerald-600 text-white shadow-sm'
+                : 'text-slate-600 hover:bg-slate-100'
+                }`}
             >
               <CheckCircle2 className="w-3.5 h-3.5" />
               <span>Completed Study Materials ({completedActivities.length})</span>

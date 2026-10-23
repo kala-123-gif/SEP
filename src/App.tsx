@@ -13,6 +13,7 @@ import { ProfilePage } from './pages/ProfilePage';
 import { ResourcesPage } from './pages/ResourcesPage';
 import { UploadResourcePage } from './pages/UploadResourcePage';
 import { AdminPage } from './pages/AdminPage';
+import { SkillExchangePage } from './pages/SkillExchangePage';
 import { CareerDevelopmentPage } from './pages/CareerDevelopmentPage';
 
 export default function App() {
@@ -59,6 +60,15 @@ export default function App() {
                 element={
                   <ProtectedRoute>
                     <ProfilePage />
+                  </ProtectedRoute>
+                }
+              />
+              {/* Protected Skill Exchange */}
+              <Route
+                path="/skill-exchange"
+                element={
+                  <ProtectedRoute>
+                    <SkillExchangePage />
                   </ProtectedRoute>
                 }
               />
