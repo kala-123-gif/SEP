@@ -175,6 +175,107 @@ app.get('/api/users/:uid/activity', auth, async(req:any,res)=>{if(!own(req,res,r
 app.delete('/api/users/:uid/activity', auth, async(req:any,res)=>{if(!own(req,res,req.params.uid))return;await col('activities').deleteMany({userId:req.params.uid});res.json({success:true});});
 app.post('/api/reports', auth, async(req:any,res)=>{if(req.body.reportedBy!==req.auth.uid)return res.status(403).json({error:'Not allowed'});const d={...req.body,reportedBy:req.auth.uid,details:String(req.body.details||'').slice(0,1000),status:'pending',createdAt:new Date().toISOString()};const result=await col('reports').insertOne(d);res.status(201).json({report:{id:String(result.insertedId),...d}});});
 
+// Skill Exchange & Mentorship: authenticated MongoDB-backed peer learning features.
+app.get('/api/skill-exchange/people', auth, async (req: any, res) => {
+  const docs = await col('users').find({}, { projection: { passwordHash: 0, resetToken: 0, resetExpires: 0 } }).sort({ displayName: 1 }).limit(300).toArray();
+  res.json({ people: docs.map((d: any) => ({ uid: d._id.toString(), displayName: d.displayName || 'Student', college: d.college || '', bio: d.bio || '', photoURL: d.photoURL || '', skills: Array.isArray(d.skills) ? d.skills : [], interests: Array.isArray(d.interests) ? d.interests : [], email: d.email })) });
+});
+app.get('/api/skill-exchange/requests', auth, async (req: any, res) => {
+  const docs = await col('connectionRequests').find({ $or: [{ fromUserId: req.auth.uid }, { toUserId: req.auth.uid }] }).sort({ createdAt: -1 }).toArray();
+  res.json({ requests: docs.map(({ _id, ...d }: any) => ({ id: String(_id), ...d })) });
+});
+app.post('/api/skill-exchange/requests', auth, async (req: any, res) => {
+  const toUserId = String(req.body.toUserId || '');
+  if (!ObjectId.isValid(toUserId) || toUserId === req.auth.uid) return res.status(400).json({ error: 'Choose another valid student.' });
+  const recipient = await col('users').findOne({ _id: asId(toUserId) }, { projection: { displayName: 1 } });
+  if (!recipient) return res.status(404).json({ error: 'Student not found.' });
+  const existing = await col('connectionRequests').findOne({ $or: [{ fromUserId: req.auth.uid, toUserId }, { fromUserId: toUserId, toUserId: req.auth.uid }], status: { $in: ['pending', 'accepted'] } });
+  if (existing) return res.status(409).json({ error: 'A request or connection already exists.' });
+  const me = await col('users').findOne({ _id: asId(req.auth.uid) });
+  const doc = { fromUserId: req.auth.uid, fromName: me?.displayName || 'Student', toUserId, toName: recipient.displayName || 'Student', status: 'pending', createdAt: new Date().toISOString() };
+  const result = await col('connectionRequests').insertOne(doc); res.status(201).json({ request: { id: String(result.insertedId), ...doc } });
+});
+app.post('/api/skill-exchange/requests/:id/respond', auth, async (req: any, res) => {
+  const status = String(req.body.status || ''); if (!['accepted', 'rejected'].includes(status)) return res.status(400).json({ error: 'Invalid response.' });
+  const result = await col('connectionRequests').updateOne({ _id: asId(req.params.id), toUserId: req.auth.uid, status: 'pending' }, { $set: { status, respondedAt: new Date().toISOString() } });
+  if (!result.matchedCount) return res.status(404).json({ error: 'Pending request not found.' }); res.json({ success: true });
+});
+app.get('/api/skill-exchange/connections', auth, async (req: any, res) => {
+  const docs = await col('connectionRequests').find({ status: 'accepted', $or: [{ fromUserId: req.auth.uid }, { toUserId: req.auth.uid }] }).toArray();
+  const ids = docs.map((d: any) => d.fromUserId === req.auth.uid ? d.toUserId : d.fromUserId).filter((id: string) => ObjectId.isValid(id));
+  const users = await col('users').find({ _id: { $in: ids.map((id: string) => asId(id)) } }, { projection: { displayName: 1, email: 1, college: 1 } }).toArray();
+  res.json({ connections: users.map((u: any) => ({ uid: u._id.toString(), userId: u._id.toString(), displayName: u.displayName, email: u.email, college: u.college })) });
+});
+app.get('/api/skill-exchange/messages', auth, async (req: any, res) => {
+  const docs = await col('skillMessages').find({ $or: [{ fromUserId: req.auth.uid }, { toUserId: req.auth.uid }] }).sort({ createdAt: 1 }).limit(300).toArray();
+  res.json({ messages: docs.map(({ _id, ...d }: any) => ({ id: String(_id), ...d })) });
+});
+app.post('/api/skill-exchange/messages', auth, async (req: any, res) => {
+  const toUserId = String(req.body.toUserId || ''), text = String(req.body.text || '').trim();
+  if (!ObjectId.isValid(toUserId) || toUserId === req.auth.uid || !text || text.length > 3000) return res.status(400).json({ error: 'Choose a valid recipient and enter a message up to 3000 characters.' });
+  const connected = await col('connectionRequests').findOne({ status: 'accepted', $or: [{ fromUserId: req.auth.uid, toUserId }, { fromUserId: toUserId, toUserId: req.auth.uid }] });
+  if (!connected) return res.status(403).json({ error: 'You can message students after accepting a connection request.' });
+  const me = await col('users').findOne({ _id: asId(req.auth.uid) }); const doc = { fromUserId: req.auth.uid, fromName: me?.displayName || 'Student', toUserId, text, createdAt: new Date().toISOString() };
+  const result = await col('skillMessages').insertOne(doc); res.status(201).json({ message: { id: String(result.insertedId), ...doc } });
+});
+app.get('/api/skill-exchange/sessions', auth, async (req: any, res) => { const docs = await col('learningSessions').find({ $or: [{ ownerId: req.auth.uid }, { partnerId: req.auth.uid }] }).sort({ scheduledAt: 1 }).toArray(); res.json({ sessions: docs.map(({ _id, ...d }: any) => ({ id: String(_id), ...d })) }); });
+app.post('/api/skill-exchange/sessions', auth, async (req: any, res) => {
+  const partnerId = String(req.body.partnerId || ''), scheduledAt = String(req.body.scheduledAt || '');
+  if (!ObjectId.isValid(partnerId) || partnerId === req.auth.uid || !scheduledAt || Number.isNaN(Date.parse(scheduledAt))) return res.status(400).json({ error: 'Choose a valid partner and session date/time.' });
+  const connected = await col('connectionRequests').findOne({ status: 'accepted', $or: [{ fromUserId: req.auth.uid, toUserId: partnerId }, { fromUserId: partnerId, toUserId: req.auth.uid }] }); if (!connected) return res.status(403).json({ error: 'Schedule sessions with accepted connections only.' });
+  const [owner, partner] = await Promise.all([col('users').findOne({ _id: asId(req.auth.uid) }), col('users').findOne({ _id: asId(partnerId) })]);
+  const doc = { ownerId: req.auth.uid, ownerName: owner?.displayName || 'Student', partnerId, partnerName: partner?.displayName || 'Student', scheduledAt: new Date(scheduledAt).toISOString(), status: 'scheduled', questions: [], createdAt: new Date().toISOString() };
+  const result = await col('learningSessions').insertOne(doc); res.status(201).json({ session: { id: String(result.insertedId), ...doc } });
+});
+app.post('/api/skill-exchange/sessions/:id/questions', auth, async (req: any, res) => {
+  const text = String(req.body.text || '').trim();
+  if (!text || text.length > 2000) return res.status(400).json({ error: 'Enter a question or answer up to 2000 characters.' });
+  const session = await col('learningSessions').findOne({ _id: asId(req.params.id), $or: [{ ownerId: req.auth.uid }, { partnerId: req.auth.uid }] });
+  if (!session) return res.status(404).json({ error: 'Learning session not found.' });
+  const me = await col('users').findOne({ _id: asId(req.auth.uid) });
+  const question = { id: new ObjectId().toString(), userId: req.auth.uid, userName: me?.displayName || 'Student', text, createdAt: new Date().toISOString() };
+  await col('learningSessions').updateOne(
+  { _id: session._id },
+  { $push: { questions: question } as any }
+  );
+  res.status(201).json({ question });
+});
+app.get('/api/skill-exchange/circles', auth, async (req: any, res) => { const docs = await col('learningCircles').find({}).sort({ createdAt: -1 }).limit(100).toArray(); res.json({ circles: docs.map(({ _id, ...d }: any) => ({ id: String(_id), ...d })) }); });
+app.post('/api/skill-exchange/circles', auth, async (req: any, res) => {
+  const name = String(req.body.name || '').trim(); if (!name || name.length > 100) return res.status(400).json({ error: 'Enter a circle name up to 100 characters.' });
+  const me = await col('users').findOne({ _id: asId(req.auth.uid) }); const doc = { name, ownerId: req.auth.uid, members: [{ userId: req.auth.uid, displayName: me?.displayName || 'Student', joinedAt: new Date().toISOString() }], discussions: [], createdAt: new Date().toISOString() };
+  const result = await col('learningCircles').insertOne(doc); res.status(201).json({ circle: { id: String(result.insertedId), ...doc } });
+});
+app.post('/api/skill-exchange/circles/:id/join', auth, async (req: any, res) => {
+  const circle = await col('learningCircles').findOne({ _id: asId(req.params.id) }); if (!circle) return res.status(404).json({ error: 'Circle not found.' });
+  if ((circle.members || []).some((m: any) => m.userId === req.auth.uid)) return res.json({ success: true, alreadyMember: true });
+  if ((circle.members || []).length >= 5) return res.status(409).json({ error: 'This circle has reached its 5-student limit.' });
+  const me = await col('users').findOne({ _id: asId(req.auth.uid) });
+await col('learningCircles').updateOne(
+  { _id: circle._id },
+  {
+    $push: {
+      members: {
+        userId: req.auth.uid,
+        displayName: me?.displayName || 'Student',
+        joinedAt: new Date().toISOString()
+      }
+    } 
+  } as any
+);
+res.json({ success: true });
+});
+app.post('/api/skill-exchange/circles/:id/discussions', auth, async (req: any, res) => {
+  const text = String(req.body.text || '').trim(); if (!text || text.length > 2000) return res.status(400).json({ error: 'Enter a discussion up to 2000 characters.' });
+  const circle = await col('learningCircles').findOne({ _id: asId(req.params.id) }); if (!circle) return res.status(404).json({ error: 'Circle not found.' });
+  if (!(circle.members || []).some((m: any) => m.userId === req.auth.uid)) return res.status(403).json({ error: 'Join the circle before posting.' });
+  const me = await col('users').findOne({ _id: asId(req.auth.uid) }); const discussion = { id: new ObjectId().toString(), userId: req.auth.uid, userName: me?.displayName || 'Student', text, createdAt: new Date().toISOString() };
+  await col('learningCircles').updateOne(
+  { _id: circle._id },
+  { $push: { discussions: discussion } as any }
+);
+res.status(201).json({ discussion });
+});
 
 // Admin-only moderation overview.
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || 'suryakalagollapalli268@gmail.com').split(',').map(v => v.trim().toLowerCase()).filter(Boolean);
