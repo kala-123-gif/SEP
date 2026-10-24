@@ -15,7 +15,7 @@ import { UploadResourcePage } from './pages/UploadResourcePage';
 import { AdminPage } from './pages/AdminPage';
 import { SkillExchangePage } from './pages/SkillExchangePage';
 import { CareerDevelopmentPage } from './pages/CareerDevelopmentPage';
-
+import ProjectsOpportunitiesPage from './pages/ProjectsOpportunitiesPage';
 export default function App() {
   return (
     <BrowserRouter>
@@ -81,7 +81,14 @@ export default function App() {
                   </ProtectedRoute>
                 }
               />
-
+<Route
+  path="/projects-opportunities"
+  element={
+    <ProtectedRoute>
+      <ProjectsOpportunitiesPage />
+    </ProtectedRoute>
+  }
+/>
               {/* Fallback */}
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>

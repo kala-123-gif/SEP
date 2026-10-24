@@ -304,5 +304,521 @@ app.patch('/api/admin/reports/:id', auth, async (req: any, res) => {
   res.json({ success: true });
 });
 
-app.use((err: any, _req: Request, res: Response, _next: NextFunction) => { console.error(err); if (err?.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: 'File exceeds the 25 MB limit.' }); res.status(500).json({ error: 'Unexpected server error.' }); });
+
+/* =========================================================
+   PROJECTS & OPPORTUNITIES MODULE
+   ========================================================= */
+
+// List open projects; optionally search by keyword.
+app.get('/api/projects', auth, async (req: any, res: Response) => {
+  try {
+    const search = String(req.query.search || '').trim();
+    const filter: any = { status: 'open' };
+
+    if (search) {
+      const keyword = search.slice(0, 80);
+      filter.$or = [
+        { title: { $regex: keyword, $options: 'i' } },
+        { description: { $regex: keyword.slice(0, 200), $options: 'i' } },
+        { skills: { $regex: keyword, $options: 'i' } },
+      ];
+    }
+
+    const docs = await col('projects')
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .toArray();
+
+    res.json({
+      projects: docs.map(({ _id, ...d }: any) => ({
+        id: String(_id),
+        ...d,
+      })),
+    });
+  } catch (error) {
+    console.error('Could not list projects:', error);
+    res.status(500).json({ error: 'Could not load projects.' });
+  }
+});
+
+// Publish a project.
+app.post('/api/projects', auth, async (req: any, res: Response) => {
+  try {
+    const title = String(req.body.title || '').trim();
+    const description = String(req.body.description || '').trim();
+    const skills = Array.isArray(req.body.skills)
+      ? req.body.skills
+          .map((s: any) => String(s).trim())
+          .filter(Boolean)
+          .slice(0, 20)
+      : [];
+    const maxTeamSize = Number(req.body.maxTeamSize || 4);
+
+    if (!title || title.length > 120) {
+      return res.status(400).json({
+        error: 'Title is required (maximum 120 characters).',
+      });
+    }
+
+    if (!description || description.length > 3000) {
+      return res.status(400).json({
+        error: 'Description is required (maximum 3000 characters).',
+      });
+    }
+
+    if (
+      !Number.isInteger(maxTeamSize) ||
+      maxTeamSize < 1 ||
+      maxTeamSize > 20
+    ) {
+      return res.status(400).json({
+        error: 'Team size must be between 1 and 20.',
+      });
+    }
+
+    const me = await col('users').findOne(
+      { _id: asId(req.auth.uid) },
+      { projection: { displayName: 1 } },
+    );
+
+    const doc = {
+      title,
+      description,
+      skills,
+      maxTeamSize,
+      ownerId: req.auth.uid,
+      ownerName: me?.displayName || 'Student',
+      memberIds: [req.auth.uid],
+      status: 'open',
+      createdAt: new Date().toISOString(),
+    };
+
+    const result = await col('projects').insertOne(doc);
+
+    return res.status(201).json({
+      project: { id: String(result.insertedId), ...doc },
+    });
+  } catch (error) {
+    console.error('Could not publish project:', error);
+    return res.status(500).json({ error: 'Could not publish the project.' });
+  }
+});
+
+// List projects created by or joined by the signed-in student.
+app.get('/api/projects/mine', auth, async (req: any, res: Response) => {
+  try {
+    const uid = req.auth.uid;
+
+    const docs = await col('projects')
+      .find({
+        $or: [{ ownerId: uid }, { memberIds: uid }],
+      })
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .toArray();
+
+    return res.json({
+      projects: docs.map(({ _id, ...d }: any) => ({
+        id: String(_id),
+        ...d,
+      })),
+    });
+  } catch (error) {
+    console.error('Could not load your projects:', error);
+    return res.status(500).json({
+      error: 'Could not load your projects.',
+    });
+  }
+});
+
+// Request to join a project.
+app.post('/api/projects/:id/join', auth, async (req: any, res: Response) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid project ID.' });
+    }
+
+    const project = await col('projects').findOne({
+      _id: asId(req.params.id),
+    });
+
+    if (!project || project.status !== 'open') {
+      return res.status(404).json({
+        error: 'Project not found or closed.',
+      });
+    }
+
+    if (project.ownerId === req.auth.uid) {
+      return res.status(400).json({
+        error: 'You already own this project.',
+      });
+    }
+
+    if ((project.memberIds || []).includes(req.auth.uid)) {
+      return res.status(409).json({
+        error: 'You are already a team member.',
+      });
+    }
+
+    const existing = await col('projectJoinRequests').findOne({
+      projectId: req.params.id,
+      userId: req.auth.uid,
+      status: 'pending',
+    });
+
+    if (existing) {
+      return res.status(409).json({
+        error: 'You already have a pending join request.',
+      });
+    }
+
+    const me = await col('users').findOne(
+      { _id: asId(req.auth.uid) },
+      { projection: { displayName: 1 } },
+    );
+
+    const doc = {
+      projectId: req.params.id,
+      userId: req.auth.uid,
+      userName: me?.displayName || 'Student',
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+
+    const result = await col('projectJoinRequests').insertOne(doc);
+
+    return res.status(201).json({
+      request: { id: String(result.insertedId), ...doc },
+    });
+  } catch (error) {
+    console.error('Could not request to join project:', error);
+    return res.status(500).json({
+      error: 'Could not submit your join request.',
+    });
+  }
+});
+
+// View join requests for a project owned by the signed-in student.
+app.get('/api/projects/:id/requests', auth, async (req: any, res: Response) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid project ID.' });
+    }
+
+    const project = await col('projects').findOne({
+      _id: asId(req.params.id),
+      ownerId: req.auth.uid,
+    });
+
+    if (!project) {
+      return res.status(404).json({ error: 'Project not found.' });
+    }
+
+    const docs = await col('projectJoinRequests')
+      .find({ projectId: req.params.id })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    return res.json({
+      requests: docs.map(({ _id, ...d }: any) => ({
+        id: String(_id),
+        ...d,
+      })),
+    });
+  } catch (error) {
+    console.error('Could not load join requests:', error);
+    return res.status(500).json({
+      error: 'Could not load join requests.',
+    });
+  }
+});
+
+// Accept or reject a join request.
+app.post(
+  '/api/projects/:id/requests/:requestId/respond',
+  auth,
+  async (req: any, res: Response) => {
+    try {
+      if (
+        !ObjectId.isValid(req.params.id) ||
+        !ObjectId.isValid(req.params.requestId)
+      ) {
+        return res.status(400).json({
+          error: 'Invalid project or request ID.',
+        });
+      }
+
+      const status = String(req.body.status || '');
+
+      if (!['accepted', 'rejected'].includes(status)) {
+        return res.status(400).json({
+          error: 'Choose accepted or rejected.',
+        });
+      }
+
+      const project = await col('projects').findOne({
+        _id: asId(req.params.id),
+        ownerId: req.auth.uid,
+      });
+
+      if (!project) {
+        return res.status(404).json({ error: 'Project not found.' });
+      }
+
+      const request = await col('projectJoinRequests').findOne({
+        _id: asId(req.params.requestId),
+        projectId: req.params.id,
+        status: 'pending',
+      });
+
+      if (!request) {
+        return res.status(404).json({
+          error: 'Pending join request not found.',
+        });
+      }
+
+      if (status === 'accepted') {
+        const members: string[] = project.memberIds || [];
+
+        if (members.includes(request.userId)) {
+          return res.status(409).json({
+            error: 'Student is already a team member.',
+          });
+        }
+
+        // Atomically add a member only if there is still room.
+        const updated = await col('projects').updateOne(
+          {
+            _id: project._id,
+            ownerId: req.auth.uid,
+            memberIds: { $ne: request.userId },
+            $expr: {
+              $lt: [
+                { $size: { $ifNull: ['$memberIds', []] } },
+                '$maxTeamSize',
+              ],
+            },
+          },
+          { $addToSet: { memberIds: request.userId } },
+        );
+
+        if (!updated.modifiedCount) {
+          return res.status(409).json({
+            error: 'The team is full or the student is already a member.',
+          });
+        }
+      }
+
+      const saved = await col('projectJoinRequests').updateOne(
+        {
+          _id: request._id,
+          projectId: req.params.id,
+          status: 'pending',
+        },
+        {
+          $set: {
+            status,
+            respondedAt: new Date().toISOString(),
+          },
+        },
+      );
+
+      if (!saved.modifiedCount) {
+        return res.status(409).json({
+          error: 'This request has already been handled.',
+        });
+      }
+
+      return res.json({ success: true, status });
+    } catch (error) {
+      console.error('Could not respond to join request:', error);
+      return res.status(500).json({
+        error: 'Could not update the join request.',
+      });
+    }
+  },
+);
+
+
+ // Delete a project if the signed-in student owns it or is an admin.
+app.delete('/api/projects/:id', auth, async (req: any, res: Response) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid project ID.' });
+    }
+
+    const project = await col('projects').findOne({
+      _id: asId(req.params.id),
+    });
+
+    if (!project) {
+      return res.status(404).json({ error: 'Project not found.' });
+    }
+
+    const isAdmin = ADMIN_EMAILS.includes(
+      String(req.auth?.email || '').toLowerCase()
+    );
+    const isOwner = project.ownerId === req.auth.uid;
+
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({
+        error: 'Only the project owner or an administrator can delete this project.',
+      });
+    }
+
+    await col('projects').deleteOne({ _id: project._id });
+
+    // Remove join requests associated with the deleted project.
+    await col('projectJoinRequests').deleteMany({
+      projectId: req.params.id,
+    });
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Could not delete project:', error);
+    return res.status(500).json({
+      error: 'Could not delete the project.',
+    });
+  }
+});
+
+
+/* =========================================================
+   OPPORTUNITIES MODULE
+   ========================================================= */
+
+// List opportunities.
+app.get('/api/opportunities', auth, async (_req: any, res: Response) => {
+  try {
+    const docs = await col('opportunities')
+      .find({})
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .toArray();
+
+    return res.json({
+      opportunities: docs.map(({ _id, ...d }: any) => ({
+        id: String(_id),
+        ...d,
+      })),
+    });
+  } catch (error) {
+    console.error('Could not load opportunities:', error);
+    return res.status(500).json({
+      error: 'Could not load opportunities.',
+    });
+  }
+});
+
+// Publish an opportunity.
+app.post('/api/opportunities', auth, async (req: any, res: Response) => {
+  try {
+    const title = String(req.body.title || '').trim();
+    const description = String(req.body.description || '').trim();
+    const type = String(req.body.type || '').trim();
+    const applicationUrl = String(req.body.applicationUrl || '').trim();
+    const deadline = String(req.body.deadline || '').trim();
+
+    if (!title || title.length > 120) {
+      return res.status(400).json({
+        error: 'Title is required (maximum 120 characters).',
+      });
+    }
+
+    if (!description || description.length > 3000) {
+      return res.status(400).json({
+        error: 'Description is required (maximum 3000 characters).',
+      });
+    }
+
+    const me = await col('users').findOne(
+      { _id: asId(req.auth.uid) },
+      { projection: { displayName: 1 } },
+    );
+
+    const doc = {
+      title,
+      description,
+      type,
+      applicationUrl,
+      deadline,
+      ownerId: req.auth.uid,
+      ownerName: me?.displayName || 'Student',
+      createdAt: new Date().toISOString(),
+    };
+
+    const result = await col('opportunities').insertOne(doc);
+
+    return res.status(201).json({
+      opportunity: {
+        id: String(result.insertedId),
+        ...doc,
+      },
+    });
+  } catch (error) {
+    console.error('Could not publish opportunity:', error);
+    return res.status(500).json({
+      error: 'Could not publish the opportunity.',
+    });
+  }
+});
+
+// Delete an opportunity if the owner or an administrator requests it.
+app.delete(
+  '/api/opportunities/:id',
+  auth,
+  async (req: any, res: Response) => {
+    try {
+      if (!ObjectId.isValid(req.params.id)) {
+        return res.status(400).json({
+          error: 'Invalid opportunity ID.',
+        });
+      }
+
+      const opportunity = await col('opportunities').findOne({
+        _id: asId(req.params.id),
+      });
+
+      if (!opportunity) {
+        return res.status(404).json({
+          error: 'Opportunity not found.',
+        });
+      }
+
+      const isAdmin = ADMIN_EMAILS.includes(
+        String(req.auth?.email || '').toLowerCase(),
+      );
+
+      const isOwner = opportunity.ownerId === req.auth.uid;
+
+      if (!isOwner && !isAdmin) {
+        return res.status(403).json({
+          error: 'Only the opportunity owner or an administrator can delete this opportunity.',
+        });
+      }
+
+      await col('opportunities').deleteOne({
+        _id: opportunity._id,
+      });
+
+      return res.json({ success: true });
+    } catch (error) {
+      console.error('Could not delete opportunity:', error);
+      return res.status(500).json({
+        error: 'Could not delete the opportunity.',
+      });
+    }
+  },
+);
+
+
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error(err);
+  if (err?.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({ error: 'File exceeds the 25 MB limit.' });
+  }
+  res.status(500).json({ error: 'Unexpected server error.' });
+});
+
 export { app, connectDb };
