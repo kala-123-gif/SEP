@@ -80,6 +80,18 @@ export const Navbar: React.FC = () => {
                 <BookOpen className="w-4 h-4" />
                 Semester Library
               </Link>
+              
+<Link
+  to="/projects-opportunities"
+  className={`px-3.5 py-2 rounded-lg text-sm font-medium transition-colors ${
+    isActive('/projects-opportunities')
+      ? 'text-indigo-600 bg-indigo-50/80 font-semibold'
+      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/70'
+  }`}
+>
+  Projects & Opportunities
+</Link>
+
               <Link
                 to="/upload"
                 className={`px-3.5 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5 ${
@@ -223,6 +235,19 @@ export const Navbar: React.FC = () => {
               >
                 Semester Library
               </Link>
+              
+<Link
+  to="/projects-opportunities"
+  onClick={() => setMobileMenuOpen(false)}
+  className={`block px-3 py-2 rounded-lg text-base font-medium ${
+    isActive('/projects-opportunities')
+      ? 'text-indigo-600 bg-indigo-50 font-semibold'
+      : 'text-slate-700'
+  }`}
+>
+  Projects & Opportunities
+</Link>
+
               <Link
                 to="/upload"
                 onClick={() => setMobileMenuOpen(false)}
